@@ -1,0 +1,2 @@
+import Link from "next/link"; import {Container} from "./container";
+export function SiteHeader(){return <header className="site-header"><Container className="site-header-inner"><Link href="/" className="wordmark">svezina.dev</Link><nav className="nav"><Link href="/writing">Writing</Link><Link href="/projects">Projects</Link><Link href="/about">About</Link><a href="https://github.com/SteveVezina">GitHub ↗</a></nav></Container></header>}
