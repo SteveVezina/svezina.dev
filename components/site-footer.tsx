@@ -1,0 +1,1 @@
+import {Container} from "./container"; export function SiteFooter(){return <footer className="site-footer"><Container className="footer-inner"><span>Steve Vezina</span><div className="footer-links"><a href="/rss.xml">RSS</a><a href="https://github.com/SteveVezina">GitHub</a></div></Container></footer>}
