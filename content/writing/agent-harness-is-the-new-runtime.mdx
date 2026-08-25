@@ -1,0 +1,440 @@
+---
+title: The Agent Harness Is the New Runtime
+description: We keep comparing coding agents as products. The more important abstraction may be the harness underneath them.
+date: 2026-08-25
+status: draft
+tags: [agents, runtimes, fx, vercel]
+---
+
+We are spending a lot of time comparing agent products.
+
+Claude Code versus Codex. OpenCode versus Hermes. Terminal UX versus IDE integration. One model versus another.
+
+Those comparisons matter, but I think they obscure a more durable layer underneath them:
+
+> **The agent harness is becoming a runtime.**
+
+A harness is the machinery that turns a model into an acting process. It owns the loop around the model: context, tool invocation, permissions, filesystem access, sessions, subagents, skills, terminal interaction, and the protocol spoken to whatever is hosting it.
+
+Once that layer becomes small and embeddable, the agent itself no longer needs to be synonymous with one application.
+
+That changes the architecture.
+
+```text
+application / UX
+      │
+      ▼
+harness protocol
+      │
+      ▼
+agent harness
+      │
+      ├── skills
+      ├── tools / MCP
+      ├── session state
+      ├── permissions
+      └── subagents
+      │
+      ▼
+sandbox / execution environment
+      │
+      ▼
+model gateway
+      │
+      ▼
+models
+```
+
+The interesting question stops being "which coding agent do we deploy?"
+
+It becomes:
+
+**what contract should exist between an agent definition and the runtime that executes it?**
+
+## Why `fx` is interesting
+
+[Vercel Labs' `fx`](https://github.com/vercel-labs/fx) is a useful project to study because it is aggressively small.
+
+It is a coding-agent harness and CLI written in Zig. The project describes itself as optimized for research and embeddability, with a production binary around 7.8 MiB. It is open source, model-agnostic, and designed for both local and cloud inference.
+
+The size is not the main point. The architecture is.
+
+`fx` can currently appear in several forms:
+
+- as the native `fx` CLI,
+- as `fx acp`, speaking Agent Client Protocol to a host,
+- as an embedded agent through `createFxAgent()`,
+- as an embedded terminal through `createFxTerminal()`.
+
+Its [`libfx` SDK](https://github.com/vercel-labs/fx/tree/main/sdk) exposes the agent core to JavaScript hosts through native bindings or WebAssembly. The host can provide network transport, session storage, configuration, permission handling, and terminal I/O.
+
+That boundary is more important than another terminal UI.
+
+It means the harness can become a **component inside another system**.
+
+## The CLI is not the product boundary anymore
+
+Most coding agents started life as applications.
+
+They owned the interface, the process, the model configuration, the tools, the session, and often the authentication story.
+
+That gives us a stack like this:
+
+```text
+Claude Code
+  └── Claude Code's loop
+      └── Claude Code's tools
+          └── Claude Code's model path
+```
+
+or:
+
+```text
+Agent B
+  └── Agent B's loop
+      └── Agent B's tools
+          └── Agent B's model path
+```
+
+Everything is vertically integrated.
+
+That is reasonable while the category is young. But infrastructure tends to become more composable as its boundaries stabilize.
+
+A harness that can speak a protocol to a host and run independently of a particular UI moves us toward this instead:
+
+```text
+VS Code ─────┐
+Terminal ────┼── harness protocol ── fx
+Web app ─────┤                       │
+CI job ──────┘                       ├── tools
+                                      ├── skills
+                                      ├── permissions
+                                      └── model
+```
+
+The application becomes replaceable without replacing the reasoning loop.
+
+And, eventually, the harness may become replaceable without changing the agent definition.
+
+That second transition is the really interesting one.
+
+## A runtime has a contract
+
+Calling something a runtime should mean more than "it executes code."
+
+A useful runtime establishes a contract between an artifact and its environment.
+
+For containers, the runtime does not need to understand the business purpose of the process. It needs to know how to construct the environment, mount resources, apply isolation, start the process, and observe its lifecycle.
+
+An agent runtime needs an analogous set of contracts.
+
+At minimum:
+
+```text
+input
+  ├── instructions
+  ├── workspace
+  ├── capabilities
+  ├── model policy
+  └── session state
+
+runtime
+  ├── reasoning loop
+  ├── tool dispatch
+  ├── context management
+  ├── permission enforcement hooks
+  ├── cancellation
+  └── event stream
+
+output
+  ├── messages
+  ├── actions
+  ├── artifacts
+  ├── traces
+  └── final status
+```
+
+Notice what is *not* necessarily part of that contract: the exact model vendor, the exact terminal UI, or a permanent set of credentials.
+
+Those can be host concerns.
+
+That is why embeddability matters. The host can own infrastructure policy while the harness owns the agent loop.
+
+## Harness protocols are the seam
+
+[Agent Client Protocol](https://agentclientprotocol.com/) is one example of an attempt to formalize the boundary between an agent and its client.
+
+The principle is familiar from other infrastructure layers: define a protocol at the seam so implementations on either side can evolve independently.
+
+If an editor, terminal, web product, or orchestration system can speak to a harness through a stable protocol, the harness stops being trapped inside one UX.
+
+That gives us two independent choices:
+
+```text
+client choice       harness choice
+─────────────       ──────────────
+editor              fx
+terminal            another harness
+web UI              custom runtime
+CI                  specialized harness
+```
+
+We are not fully there yet. Protocols are still evolving, harness behavior differs substantially, and higher-level concepts such as skills, permission models, and subagent semantics are not standardized.
+
+But the direction matters.
+
+The seam now exists.
+
+## Skills and tools start looking like runtime resources
+
+Once the harness is viewed as a runtime, concepts that currently feel like "agent features" begin to look more like mounted resources.
+
+A skill is not necessarily part of the harness binary. It can be supplied to the runtime.
+
+A tool server is not necessarily linked into the harness. It can be discovered or connected at runtime.
+
+A model is not necessarily compiled into the agent. It can be selected by policy.
+
+A workspace is not necessarily owned by the host process. It can be mounted into a sandbox.
+
+That suggests a different mental model:
+
+```text
+agent definition
+  │
+  ├── instructions
+  ├── skills
+  ├── required capabilities
+  └── model constraints
+        │
+        ▼
+agent runtime
+  │
+  ├── mounts workspace
+  ├── resolves tools
+  ├── applies policy
+  ├── binds model
+  └── starts harness
+```
+
+This is much closer to how we think about workloads in infrastructure systems than how we currently think about chatbot applications.
+
+## The sandbox should sit below the harness
+
+The previous post in this series argued that agents should not permanently own the credentials behind their capabilities.
+
+The same separation applies to execution.
+
+The harness should not *be* the security boundary for arbitrary code execution.
+
+A coding agent may decide to run a shell command, compile a repository, execute tests, or inspect generated files. Those operations should happen inside an environment whose restrictions remain valid even if the model makes a bad decision.
+
+```text
+agent harness
+     │
+     │ requests execution
+     ▼
+sandbox boundary
+     │
+     ├── filesystem policy
+     ├── network policy
+     ├── process isolation
+     ├── resource limits
+     └── ephemeral credentials
+```
+
+[Vercel Sandbox](https://vercel.com/docs/sandbox) is one concrete execution substrate for this style of system. The specific sandbox technology is less important than the layering: the harness decides *what to try*; the sandbox constrains *what the attempt can actually affect*.
+
+This is the same reason authorization should live outside the model loop.
+
+Policy is more valuable when it survives a compromised or confused agent.
+
+## Model independence is a runtime property
+
+`fx` describes itself as model-agnostic, but model independence is broader than supporting a list of model names.
+
+A truly portable harness should not require the agent definition to care whether inference comes from:
+
+- a hosted API,
+- Vercel AI Gateway,
+- an enterprise gateway,
+- vLLM,
+- Ollama,
+- NVIDIA NIM,
+- or another OpenAI-compatible endpoint.
+
+The host should be able to bind a logical model requirement to an actual provider.
+
+For example:
+
+```yaml
+model:
+  class: coding
+  requirements:
+    context: ">=128k"
+    tools: true
+```
+
+could resolve differently on a laptop, in CI, and in a private GPU cluster.
+
+The agent asks for a capability. The environment selects the implementation.
+
+That is how runtimes become portable.
+
+## A tiny experiment
+
+You can already see the shape of this with `fx` today.
+
+Install it:
+
+```bash
+curl -fsSL https://fx.sh/setup.sh | bash
+```
+
+Run it as an interactive agent:
+
+```bash
+cd my-project
+fx
+```
+
+Or expose the native harness over ACP:
+
+```bash
+fx acp
+```
+
+The important experiment is not whether the CLI can edit a file. Many agents can do that.
+
+The experiment I want to build next is this:
+
+```text
+web application
+      │
+      ▼
+ephemeral sandbox
+      │
+      ├── repository workspace
+      ├── injected skill
+      └── bounded tool access
+      │
+      ▼
+fx harness
+      │
+      ▼
+OpenAI-compatible model gateway
+```
+
+No permanent provider credential in the sandbox. No application-specific agent loop. The host supplies the policy and environment; `fx` supplies the loop.
+
+If the same agent definition can later run under a second harness, we have something much more interesting than an embedded CLI.
+
+We have the beginning of a runtime contract.
+
+## What the harness should not own
+
+A clean runtime boundary becomes easier to reason about if we explicitly remove responsibilities from it.
+
+The harness should not need to permanently own:
+
+- cloud credentials,
+- human OAuth refresh tokens,
+- infrastructure scheduling,
+- durable global policy,
+- the only copy of session state,
+- the only audit log,
+- the only implementation of sandbox isolation.
+
+It may *interact* with all of those systems, but the environment should be able to constrain and replace them.
+
+That leaves the harness with a much tighter job:
+
+> **Turn instructions, context, tools, and a model into a controlled sequence of actions and events.**
+
+That is a runtime-sized responsibility.
+
+## The container analogy, carefully
+
+The analogy to containers is useful if we do not push it too far.
+
+```text
+Containers                     Agents
+────────────────────────────────────────────────
+OCI image                      agent artifact
+container config               agent manifest
+container runtime              agent harness
+mounted volumes                workspace / knowledge
+secrets / identity             delegated capabilities
+runtime isolation              sandbox
+registry                       agent artifact registry
+```
+
+An LLM agent is not a deterministic process image. Its behavior depends on model responses, changing context, external tools, and probabilistic inference.
+
+But portability does not require determinism.
+
+It requires explicit contracts.
+
+Containers became portable because packaging, distribution, configuration, and runtime execution stopped being inseparable implementation details of one product.
+
+Agents are approaching a similar architectural pressure point.
+
+## What is still missing
+
+Today, a "portable agent" is usually a Git repository plus instructions explaining which CLI to install.
+
+That is not a runtime contract.
+
+We still lack broadly accepted ways to describe:
+
+- the agent's instructions,
+- its required skills,
+- its required tools and capabilities,
+- model requirements rather than model vendor names,
+- sandbox expectations,
+- identity requirements,
+- network policy,
+- state and persistence semantics,
+- compatibility with a harness,
+- provenance and signatures.
+
+Some of these may eventually be standardized. Some may remain platform-specific.
+
+But the abstraction is becoming visible enough that we can start designing it explicitly.
+
+## The shift
+
+The most important thing about projects like `fx` is not that they provide another coding-agent experience.
+
+It is that they make the loop **small enough to embed** and **separate enough to host**.
+
+That creates a new architecture:
+
+```text
+agent != application
+agent != model
+agent != harness
+
+agent = portable intent + capabilities + context
+        executed by a harness
+        inside an infrastructure boundary
+```
+
+If that model holds, the next obvious question is packaging.
+
+What is the artifact we hand to the runtime?
+
+What belongs in its manifest?
+
+Can we distribute it through infrastructure we already have instead of inventing another bespoke registry?
+
+That is the subject of the next post:
+
+**What Would OCI for Agents Look Like?**
+
+## Further reading
+
+- [`vercel-labs/fx`](https://github.com/vercel-labs/fx)
+- [`libfx` SDK](https://github.com/vercel-labs/fx/tree/main/sdk)
+- [Agent Client Protocol](https://agentclientprotocol.com/)
+- [Vercel Sandbox](https://vercel.com/docs/sandbox)
