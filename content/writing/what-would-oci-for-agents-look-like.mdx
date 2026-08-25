@@ -1,0 +1,607 @@
+---
+title: What Would OCI for Agents Look Like?
+description: If agent harnesses become interchangeable runtimes, we need a portable artifact to hand them. OCI already gives us useful primitives.
+date: 2026-08-25
+status: draft
+tags: [agents, runtimes, oci, infrastructure]
+---
+
+If the agent harness is a runtime, the next question is unavoidable:
+
+> **What is the artifact that the runtime executes?**
+
+Today the answer is usually some combination of a Git repository, a prompt file, a folder of skills, environment variables, tool configuration, and a README explaining how to wire everything together.
+
+That works for humans. It is a weak contract for infrastructure.
+
+A portable agent needs something more explicit: a package that can be identified, transported, verified, inspected, and executed by different runtimes without baking every deployment detail into the agent itself.
+
+The obvious temptation is to invent an entirely new registry and packaging system.
+
+I think we should resist that at first.
+
+The [Open Container Initiative image specification](https://specs.opencontainers.org/image-spec/) already gives us content-addressable manifests, descriptors, layers, indexes, digests, and a distribution ecosystem. OCI 1.1 also formalized support for non-container artifacts through `artifactType` and related artifact guidance.
+
+That does **not** mean an agent should simply be a container image.
+
+It means OCI may already contain most of the boring distribution machinery we need.
+
+## Start with the problem, not the format
+
+A useful agent package should answer a small set of infrastructure questions before the runtime starts:
+
+```text
+What is this agent?
+What instructions define it?
+What capabilities does it require?
+What skills or assets belong to it?
+What model properties does it require?
+What execution boundary does it expect?
+What state is portable, and what state is external?
+Who produced this artifact?
+Can I verify it before running it?
+```
+
+Those are packaging questions.
+
+They are distinct from runtime questions such as how the harness performs context compaction or chooses the next tool call.
+
+The separation is important:
+
+```text
+agent artifact
+      │
+      ▼
+agent runtime / harness
+      │
+      ▼
+execution environment
+```
+
+A runtime should be able to inspect the artifact and decide whether it can satisfy its requirements.
+
+## Why OCI is attractive
+
+OCI images are built around content-addressed objects referenced by descriptors. A manifest points to configuration and content layers. Digests allow consumers to verify that what they received is exactly what was published.
+
+That gives agent packaging several useful properties almost for free:
+
+- immutable content identities,
+- existing registry transport,
+- deduplicated layers,
+- signatures and provenance ecosystems,
+- versioned manifests,
+- existing tooling for push, pull, copy, and cache,
+- the ability to represent artifacts that are not runnable container images.
+
+The important distinction is this:
+
+> **Use OCI as the envelope, not as the agent semantics.**
+
+The agent specification would define what the config and layers mean. OCI would handle identity and distribution.
+
+## A possible artifact shape
+
+Imagine publishing an agent as:
+
+```text
+ghcr.io/acme/repo-reviewer:v1
+```
+
+The registry object could use an agent-specific artifact type:
+
+```text
+application/vnd.agent.manifest.v1+json
+```
+
+The OCI manifest might reference an agent configuration plus several content layers:
+
+```text
+OCI manifest
+  │
+  ├── config
+  │     └── agent.json
+  │
+  ├── layer: instructions
+  │     └── AGENT.md
+  │
+  ├── layer: skills
+  │     └── skills.tar.gz
+  │
+  ├── layer: assets
+  │     └── templates.tar.gz
+  │
+  └── layer: optional code
+        └── runtime-assets.tar.gz
+```
+
+The package describes the agent. It does not necessarily contain an operating system filesystem.
+
+That difference matters because the sandbox and the harness may be supplied independently by the execution platform.
+
+## The manifest should describe requirements, not deployment secrets
+
+A first-pass agent config might look something like this:
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "repo-reviewer",
+  "entrypoint": "AGENT.md",
+  "runtime": {
+    "protocol": "acp",
+    "harness": {
+      "compatible": ["fx>=0.0.5"]
+    }
+  },
+  "model": {
+    "class": "coding",
+    "requirements": {
+      "toolCalling": true,
+      "contextTokens": 128000
+    }
+  },
+  "capabilities": [
+    {
+      "name": "workspace.read",
+      "required": true
+    },
+    {
+      "name": "workspace.exec",
+      "required": true
+    },
+    {
+      "name": "github.read",
+      "required": false
+    }
+  ],
+  "sandbox": {
+    "network": "restricted",
+    "filesystem": "workspace",
+    "ephemeral": true
+  }
+}
+```
+
+There are two deliberate omissions.
+
+There is no model API key.
+
+There is no GitHub token.
+
+The artifact declares **required capabilities**. The environment decides how those capabilities are satisfied.
+
+That allows the same artifact to run differently in different environments:
+
+```text
+Laptop
+  github.read -> local gh credential helper
+  model       -> Ollama
+
+CI
+  github.read -> GitHub OIDC / installation token
+  model       -> enterprise gateway
+
+Cloud sandbox
+  github.read -> short-lived brokered capability
+  model       -> hosted AI gateway
+```
+
+The agent remains portable because identity binding is external to the package.
+
+## Capabilities should be names, not credentials
+
+This is where agent packaging and secretless architecture meet.
+
+A package should say:
+
+```text
+I require github.read on the workspace repository.
+```
+
+It should not say:
+
+```text
+Here is GITHUB_TOKEN=ghp_...
+```
+
+The runtime or platform resolves a capability request against identity and policy.
+
+Conceptually:
+
+```text
+artifact capability request
+        │
+        ▼
+identity + policy engine
+        │
+        ├── deny
+        │
+        └── grant
+              │
+              ▼
+       short-lived binding
+```
+
+That binding might become an OAuth token, a signed request, a local tool socket, an MCP connection, or some other mechanism.
+
+The package should not care.
+
+This is exactly the kind of indirection that makes an artifact portable.
+
+## Tools need both identity and interface contracts
+
+Tool portability is harder than model portability.
+
+Two environments may both claim to provide "GitHub", yet expose completely different interfaces.
+
+One may provide an MCP server. Another may expose a native tool. A third may offer only a REST proxy.
+
+So a capability declaration probably needs two layers:
+
+```yaml
+capability: github.read
+interface:
+  protocol: mcp
+  contract: io.modelcontext.github.v1
+```
+
+or:
+
+```yaml
+capability: shell.exec
+interface:
+  protocol: harness-native
+  contract: io.agent.workspace.exec.v1
+```
+
+The capability answers **what authority is required**.
+
+The interface answers **how the harness invokes it**.
+
+Conflating those two creates exactly the portability problems we are trying to avoid.
+
+## Skills are natural content layers
+
+Skills are one of the easiest pieces to package cleanly.
+
+They are mostly content: instructions, examples, scripts, templates, and supporting assets.
+
+That maps naturally onto OCI layers.
+
+```text
+agent:v3
+  ├── base instructions layer    sha256:aaa...
+  ├── git skill layer            sha256:bbb...
+  ├── review skill layer         sha256:ccc...
+  └── policy hints layer         sha256:ddd...
+```
+
+If ten agents share the same skill layer, registries can deduplicate it.
+
+If a skill changes, its digest changes.
+
+If a runtime wants to inspect provenance or enforce an allowlist, it can do so before the skill is mounted.
+
+This is much better than "curl this repository and hope the folder called `skills` means what you think it means."
+
+## The artifact should not contain the harness by default
+
+There are two obvious packaging models.
+
+The first bundles everything:
+
+```text
+agent artifact
+  ├── harness binary
+  ├── model adapter
+  ├── instructions
+  ├── tools
+  └── dependencies
+```
+
+That is easy to reproduce but destroys much of the runtime abstraction. Every agent ships its own harness implementation, patch level, and infrastructure assumptions.
+
+The second model keeps the harness external:
+
+```text
+agent artifact
+  ├── instructions
+  ├── skills
+  ├── tool contracts
+  └── runtime requirements
+
+platform
+  ├── harness
+  ├── sandbox
+  ├── identity
+  ├── model binding
+  └── policy
+```
+
+I prefer the second as the default.
+
+It gives the platform room to patch the runtime, choose a compatible harness, apply policy consistently, and select infrastructure without rebuilding every agent artifact.
+
+There may still be cases where a custom harness is itself packaged as an OCI layer or referenced artifact. But that should be an explicit choice rather than the only model.
+
+## Compatibility needs to be negotiated
+
+Container portability works partly because the runtime contract is narrow.
+
+Agent harnesses are not yet that uniform.
+
+A portable artifact may require features such as:
+
+- ACP support,
+- MCP client support,
+- subagents,
+- specific permission callbacks,
+- structured tool results,
+- filesystem execution,
+- browser capabilities,
+- durable sessions.
+
+The manifest should express those requirements in machine-readable form.
+
+For example:
+
+```json
+{
+  "runtimeRequirements": {
+    "protocols": ["acp@1"],
+    "features": [
+      "skills@1",
+      "mcp-client@1",
+      "subagents@1"
+    ]
+  }
+}
+```
+
+A platform can then fail before execution with a useful message:
+
+```text
+Cannot run repo-reviewer:v3
+Missing runtime feature: subagents@1
+```
+
+That is much better than discovering incompatibility halfway through a session.
+
+## Model selection should be late-bound
+
+Agent packages should usually specify **model requirements**, not one immutable vendor/model identifier.
+
+For example:
+
+```yaml
+model:
+  profile: coding-large
+  requires:
+    contextTokens: 128000
+    toolCalling: true
+    vision: false
+```
+
+The runtime environment could bind that profile to:
+
+```text
+Development     -> local Qwen
+CI              -> hosted coding model
+Enterprise      -> approved internal endpoint
+High assurance  -> pinned model + version
+```
+
+Some agents will absolutely require a specific model. Reproducibility and evaluation may demand it.
+
+But that should be an explicit constraint:
+
+```yaml
+model:
+  exact: provider/model@version
+```
+
+Late binding should be the portable default, not a religion.
+
+## State should not accidentally become part of the artifact
+
+An artifact should represent a deployable agent definition, not every conversation it has ever had.
+
+That suggests separating three categories:
+
+```text
+immutable package state
+  instructions, skills, assets
+
+runtime state
+  current session, context window, task progress
+
+external durable state
+  memory, database records, artifacts, checkpoints
+```
+
+The package can declare state interfaces, but should not silently absorb mutable production state into new versions.
+
+This also makes rollback meaningful. Reverting from `agent:v4` to `agent:v3` should change the agent definition, not rewind a user's database by accident.
+
+## OCI indexes could represent variants
+
+OCI indexes already provide a way to point at multiple manifests.
+
+For agents, variants could be useful for more than CPU architecture.
+
+An index could theoretically select among packages optimized for different harness capabilities or execution environments:
+
+```text
+repo-reviewer:latest
+  ├── minimal / terminal
+  ├── browser-enabled
+  └── enterprise-restricted
+```
+
+I would be cautious here. Variant explosion is easy.
+
+The default artifact should remain as environment-independent as possible. But the underlying OCI primitive is available if genuine packaging differences are necessary.
+
+## Provenance matters more for agents than it first appears
+
+An agent artifact may contain executable scripts, instructions that influence model behavior, tool definitions, and skills that cause external actions.
+
+That is supply-chain material.
+
+Content digests give us integrity, but integrity only answers whether the artifact changed.
+
+We also need provenance:
+
+```text
+Who built this?
+From which source commit?
+Which skills were included?
+Which policy approved it?
+Which evaluations passed?
+Was the artifact signed?
+```
+
+The OCI ecosystem already has patterns for signatures, attestations, SBOMs, and referrer artifacts. An agent packaging standard should reuse those mechanisms wherever possible instead of recreating an "agent trust database."
+
+An evaluation report could even be attached as a related artifact without modifying the agent package itself.
+
+```text
+agent digest
+   │
+   ├── signature
+   ├── provenance attestation
+   ├── security scan
+   └── evaluation report
+```
+
+That is a compelling reason to build on an existing artifact graph.
+
+## What a CLI could feel like
+
+If the packaging model is right, the UX can become boring:
+
+```bash
+agent pull ghcr.io/acme/repo-reviewer:v1
+agent inspect ghcr.io/acme/repo-reviewer:v1
+agent run ghcr.io/acme/repo-reviewer:v1 .
+```
+
+Inspection might show:
+
+```text
+NAME          repo-reviewer
+DIGEST        sha256:7b6...
+ENTRYPOINT    AGENT.md
+HARNESS       acp compatible
+MODEL         coding, >=128k, tool-calling
+CAPABILITIES  workspace.read, workspace.exec, github.read
+SANDBOX       ephemeral, restricted-network
+SKILLS        git-review@sha256:..., security@sha256:...
+SIGNATURE     verified
+```
+
+The platform could then resolve requirements before starting the harness.
+
+That is the experience I want: **agent deployment should become inspectable infrastructure, not installation folklore.**
+
+## What I would standardize first
+
+Trying to standardize the entire agent ecosystem now would be premature.
+
+I would start with the smallest portable core:
+
+1. **Artifact identity and distribution** through OCI.
+2. **A versioned agent config** describing entrypoint, assets, and runtime requirements.
+3. **Capability declarations** separated from credential bindings.
+4. **Skill/content layers** with stable media types.
+5. **Runtime feature negotiation** so incompatible harnesses fail early.
+6. **Provenance hooks** using existing OCI referrers and attestations.
+
+I would explicitly avoid standardizing model prompting internals, memory implementation, planning algorithms, or context-compaction strategies in the first version.
+
+Those belong inside the harness and should remain areas of competition.
+
+A good standard freezes the seams, not the innovation.
+
+## This is not a proposal for an official standard
+
+There is an important difference between a useful design exercise and declaring a standard.
+
+The ecosystem is too young to know which abstractions will survive.
+
+`skills`, MCP, ACP, sandbox APIs, identity brokers, and harness interfaces are all moving quickly. Any serious specification would need experimentation across multiple runtimes and platforms first.
+
+So the practical next step is smaller:
+
+> **Build one agent artifact as an OCI artifact, publish it to a normal registry, and make two different harness environments execute it.**
+
+That experiment would answer more than another 30-page specification document.
+
+If the artifact can move between environments while keeping its identity, skills, capability requirements, and provenance intact, we will have validated the most important part of the idea.
+
+## The broader architecture
+
+The three posts in this series now point toward the same stack:
+
+```text
+OCI registry
+     │
+     ▼
+agent artifact
+     │
+     ▼
+harness runtime
+     │
+     ├── model binding
+     ├── skills
+     ├── tools
+     └── session
+     │
+     ▼
+sandbox
+     │
+     ▼
+identity + policy + capability broker
+     │
+     ▼
+external systems
+```
+
+The agent package describes **intent and requirements**.
+
+The harness supplies **reasoning execution**.
+
+The sandbox supplies **containment**.
+
+Identity and policy supply **authority**.
+
+The registry supplies **distribution and trustable identity**.
+
+None of those layers needs to own the entire system.
+
+That is the architecture I find more interesting than another vertically integrated agent application.
+
+## The question
+
+Containers became infrastructure when we stopped treating packaging, distribution, and execution as private implementation details of individual platforms.
+
+Agents may be approaching the same transition.
+
+The wrong first question is probably:
+
+> What new agent registry should we build?
+
+The better one is:
+
+> **How little new machinery do we need to make agents portable?**
+
+OCI may already provide a surprisingly large part of the answer.
+
+## Further reading
+
+- [OCI Image Specification](https://specs.opencontainers.org/image-spec/)
+- [OCI Image Manifest Specification](https://specs.opencontainers.org/image-spec/manifest/)
+- [OCI Image and Distribution Specs v1.1](https://opencontainers.org/posts/blog/2024-03-13-image-and-distribution-1-1/)
+- [`vercel-labs/fx`](https://github.com/vercel-labs/fx)
+- [Agent Client Protocol](https://agentclientprotocol.com/)
