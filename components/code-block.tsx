@@ -1,6 +1,7 @@
 'use client';
 
 import {useRef, useState, type ComponentPropsWithoutRef} from 'react';
+import styles from './code-block.module.css';
 
 export function CodeBlock(props: ComponentPropsWithoutRef<'pre'>) {
   const {children, className, ...rest} = props;
@@ -15,10 +16,10 @@ export function CodeBlock(props: ComponentPropsWithoutRef<'pre'>) {
   }
 
   return (
-    <div className="code-block">
+    <div className={styles.root}>
       <button
         type="button"
-        className="code-copy-button"
+        className={styles.copyButton}
         aria-label="Copy code"
         onClick={copyCode}
       >
