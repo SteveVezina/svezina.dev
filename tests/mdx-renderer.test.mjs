@@ -12,3 +12,14 @@ test('blog uses the React 19 compatible RSC MDX renderer', async () => {
   assert.equal(pkg.dependencies['next-mdx-remote'], undefined);
   assert.match(renderer, /next-mdx-remote-client\/rsc/);
 });
+
+test('fenced MDX code blocks use the shared copyable code block renderer', async () => {
+  const renderer = await read('components/mdx-content.tsx');
+  const codeBlock = await read('components/code-block.tsx');
+
+  assert.match(renderer, /import \{CodeBlock\} from ['\"]\.\/code-block['\"]/);
+  assert.match(renderer, /components=\{\{pre: CodeBlock\}\}/);
+  assert.match(codeBlock, /navigator\.clipboard\.writeText/);
+  assert.match(codeBlock, /aria-label=['\"]Copy code['\"]/);
+  assert.match(codeBlock, /Copied/);
+});
